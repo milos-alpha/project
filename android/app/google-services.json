@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1067819382948",
+    "project_id": "schedulepro-37685",
+    "storage_bucket": "schedulepro-37685.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1067819382948:android:ba9831cf028be88463ce31",
+        "android_client_info": {
+          "package_name": "com.example.project"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA3sW3RXsiveHcE7Dc7TJdodTFk9d2Z1i0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

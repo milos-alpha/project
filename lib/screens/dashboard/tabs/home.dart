@@ -6,9 +6,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:carousel_slider/carousel_slider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
+import 'dart:convert';
+import 'package:intl/intl.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
 
 class HomeTab extends StatefulWidget {
-  const HomeTab({super.key});
+  const HomeTab({Key? key});
 
   @override
   State<HomeTab> createState() => _HomeTabState();
@@ -18,13 +23,19 @@ class _HomeTabState extends State<HomeTab> {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final firebase_storage.FirebaseStorage _storage = firebase_storage.FirebaseStorage.instance;
+  final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+  FlutterLocalNotificationsPlugin();
 
   String? _profileImageUrl;
   String? _userName;
   String? _userEmail;
   bool _isLoading = true;
-  final double _activitiesCovered = 65.0; // Example value
-  final double _activitiesRemaining = 35.0; // Example value
+  double _activitiesCovered = 0.0;
+  double _activitiesRemaining = 0.0;
+
+  // Schedule Data
+  List<Map<String, dynamic>> _weeklySchedule = [];
+  List<Map<String, dynamic>> _dailySchedule = [];
 
   // SharedPreferences keys (matching login/signup screens)
   static const String keyUserId = 'user_id';
@@ -54,6 +65,21 @@ class _HomeTabState extends State<HomeTab> {
   void initState() {
     super.initState();
     _loadUserData();
+    _initializeNotifications();
+    _loadScheduleData();
+  }
+
+  Future<void> _initializeNotifications() async {
+    tz.initializeTimeZones(); // Initialize timezone data
+    const androidSettings = AndroidInitializationSettings('@mipmap/ic_launcher');
+    const iosSettings = DarwinInitializationSettings();
+    const initSettings =
+    InitializationSettings(android: androidSettings, iOS: iosSettings);
+
+    await flutterLocalNotificationsPlugin.initialize(
+      initSettings,
+      // onDidReceiveNotificationResponse: _handleNotificationResponse,
+    );
   }
 
   Future<void> _loadUserData() async {
@@ -126,6 +152,99 @@ class _HomeTabState extends State<HomeTab> {
     }
   }
 
+  Future<void> _loadScheduleData() async {
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      setState(() {
+        _weeklySchedule = List<Map<String, dynamic>>.from(
+            json.decode(prefs.getString('weeklySchedule') ?? '[]'));
+        _dailySchedule = List<Map<String, dynamic>>.from(
+            json.decode(prefs.getString('dailySchedule') ?? '[]'));
+        _updateActivityStatistics();
+
+        // Schedule notifications for daily tasks
+        _scheduleDailyNotifications();
+      });
+    } catch (e) {
+      debugPrint('Error loading schedules: $e');
+    }
+  }
+
+  Future<void> _saveScheduleData() async {
+    final prefs = await SharedPreferences.getInstance();
+    try {
+      await prefs.setString('weeklySchedule', json.encode(_weeklySchedule));
+      await prefs.setString('dailySchedule', json.encode(_dailySchedule));
+    } catch (e) {
+      debugPrint('Error saving schedules: $e');
+    }
+  }
+
+  Future<void> _scheduleDailyNotifications() async {
+    const androidDetails = AndroidNotificationDetails(
+      'daily_task_channel',
+      'Daily Task Notifications',
+      importance: Importance.max,
+      priority: Priority.high,
+    );
+    const iosDetails = DarwinNotificationDetails();
+    const details = NotificationDetails(android: androidDetails, iOS: iosDetails);
+
+    for (int i = 0; i < _dailySchedule.length; i++) {
+      final schedule = _dailySchedule[i];
+      final dateStr = schedule['date'];
+      final timeStr = schedule['time'];
+      final description = schedule['description'];
+
+      try {
+        final parsedTime = DateFormat('HH:mm').parse(timeStr);
+        final scheduledDate = DateFormat('yyyy-MM-dd').parse(dateStr);
+
+        final scheduledDateTime = DateTime(
+          scheduledDate.year,
+          scheduledDate.month,
+          scheduledDate.day,
+          parsedTime.hour,
+          parsedTime.minute,
+        );
+
+        if (scheduledDateTime.isAfter(DateTime.now())) {
+          // Schedule the notification
+          final tz.TZDateTime tzScheduledTime =
+          tz.TZDateTime.from(scheduledDateTime, tz.local);
+
+          await flutterLocalNotificationsPlugin.zonedSchedule(
+            i, // Use a unique ID for each notification
+            'Daily Task Reminder',
+            description,
+            tzScheduledTime,
+            details,
+            uiLocalNotificationDateInterpretation:
+            UILocalNotificationDateInterpretation.absoluteTime,
+            androidScheduleMode: AndroidScheduleMode.alarmClock,
+          );
+          debugPrint('Notification scheduled for: $scheduledDateTime');
+        }
+      } catch (e) {
+        debugPrint('Error scheduling notification: $e');
+      }
+    }
+  }
+
+  void _updateActivityStatistics() {
+    int coveredCount =
+        _dailySchedule.where((schedule) => schedule['covered'] == true).length;
+    int totalCount = _dailySchedule.length;
+
+    if (totalCount > 0) {
+      _activitiesCovered = (coveredCount / totalCount) * 100;
+      _activitiesRemaining = 100 - _activitiesCovered;
+    } else {
+      _activitiesCovered = 0.0;
+      _activitiesRemaining = 100.0;
+    }
+  }
+
   String? _profilePictureUrl; // Store the URL
 
   Future<void> _updateProfilePicture(BuildContext context) async {
@@ -170,7 +289,6 @@ class _HomeTabState extends State<HomeTab> {
           .doc(userId)
           .update({'profilePictureUrl': imageUrl});
 
-
       // 4. Update SharedPreferences
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('profilePictureUrl', imageUrl);
@@ -183,8 +301,6 @@ class _HomeTabState extends State<HomeTab> {
 
       ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Profile picture updated!')));
-
-
     } catch (e) {
       debugPrint('Error updating profile picture: $e');
       ScaffoldMessenger.of(context).showSnackBar(
@@ -380,7 +496,11 @@ class _HomeTabState extends State<HomeTab> {
               Colors.green,
                   () => _showActivitiesModal(
                 'Completed Activities',
-                ['Activity 1', 'Activity 2', 'Activity 3'], // Example data
+                _dailySchedule
+                    .where((schedule) => schedule['covered'] == true)
+                    .map((schedule) =>
+                '${schedule['date']} - ${schedule['description'] as String}')
+                    .toList(),
               ),
             ),
           ),
@@ -392,7 +512,11 @@ class _HomeTabState extends State<HomeTab> {
               Colors.orange,
                   () => _showActivitiesModal(
                 'Remaining Activities',
-                ['Activity 4', 'Activity 5'], // Example data
+                _dailySchedule
+                    .where((schedule) => schedule['covered'] != true)
+                    .map((schedule) =>
+                '${schedule['date']} - ${schedule['description'] as String}')
+                    .toList(),
               ),
             ),
           ),
@@ -468,23 +592,140 @@ class _HomeTabState extends State<HomeTab> {
     );
   }
 
+  Widget _buildUpcomingDailySchedule() {
+    if (_dailySchedule.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(16.0),
+        child: Text('No daily schedules added.'),
+      );
+    }
+
+    // Find the next upcoming schedule
+    DateTime now = DateTime.now();
+    Map<String, dynamic>? nextSchedule;
+    Duration shortestDifference = const Duration(days: 365); // Initialize with a large duration
+
+    for (var schedule in _dailySchedule) {
+      DateTime scheduleDate = DateFormat('yyyy-MM-dd').parse(schedule['date']);
+      TimeOfDay scheduleTime = TimeOfDay(
+        hour: int.parse(schedule['time'].split(':')[0]),
+        minute: int.parse(schedule['time'].split(':')[1]),
+      );
+      DateTime combinedDateTime = DateTime(
+        scheduleDate.year,
+        scheduleDate.month,
+        scheduleDate.day,
+        scheduleTime.hour,
+        scheduleTime.minute,
+      );
+
+      Duration difference = combinedDateTime.difference(now);
+
+      if (difference > Duration.zero && difference < shortestDifference) {
+        shortestDifference = difference;
+        nextSchedule = schedule;
+      }
+    }
+
+    if (nextSchedule == null) {
+      return const Padding(
+        padding: EdgeInsets.all(16.0),
+        child: Text('No upcoming schedules for today or later.'),
+      );
+    }
+
+    return Card(
+      elevation: 4,
+      margin: const EdgeInsets.all(16.0),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Upcoming Daily Schedule',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text('Date: ${nextSchedule['date'] as String}'),
+            Text('Time: ${nextSchedule['time'] as String}'),
+            Text('Description: ${nextSchedule['description'] as String}'),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTodaysWeeklySchedule() {
+    if (_weeklySchedule.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(16.0),
+        child: Text('No weekly schedule added.'),
+      );
+    }
+
+    String currentDay = DateFormat('EEEE').format(DateTime.now());
+    Map<String, String>? tasks =
+    Map<String, String>.from(_weeklySchedule.first['tasks']);
+    String? todaysTask = tasks[currentDay];
+
+    if (todaysTask == null || todaysTask.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Text('No tasks scheduled for $currentDay.'),
+      );
+    }
+
+    return Card(
+      elevation: 4,
+      margin: const EdgeInsets.all(16.0),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Today\'s ($currentDay) Task',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(todaysTask),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (_isLoading) {
       return const Center(child: CircularProgressIndicator());
     }
 
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildHeader(),
-          const SizedBox(height: 16),
-          _buildCarousel(),
-          const SizedBox(height: 16),
-          _buildStatistics(),
-          _buildReviewButton(),
-        ],
+    return RefreshIndicator(
+      onRefresh: () async {
+        await _loadScheduleData();
+      },
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildHeader(),
+            const SizedBox(height: 16),
+            _buildCarousel(),
+            const SizedBox(height: 16),
+            _buildUpcomingDailySchedule(),
+            _buildTodaysWeeklySchedule(),
+            _buildStatistics(),
+            _buildReviewButton(),
+          ],
+        ),
       ),
     );
   }
